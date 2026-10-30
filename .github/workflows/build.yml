@@ -85,16 +85,50 @@ jobs:
           package com.vys.lock;
 
           import android.accessibilityservice.AccessibilityService;
+          import android.accessibilityservice.AccessibilityServiceInfo;
           import android.content.Intent;
           import android.view.accessibility.AccessibilityEvent;
+          import java.util.Set;
 
           public class LockService extends AccessibilityService {
               static volatile String unlocked;
               static volatile boolean showing;
+              static volatile LockService inst;
+              volatile boolean wide;
 
               @Override
               protected void onServiceConnected() {
+                  inst = this;
+                  wide = false;
+                  apply();
                   if (!Store.hasPin(this)) openPin(PinActivity.CREATE_FIRST, null);
+              }
+
+              @Override
+              public boolean onUnbind(Intent i) {
+                  inst = null;
+                  return super.onUnbind(i);
+              }
+
+              // Normalde sadece kilitli uygulamaların olayları gelir; kilit açılınca
+              // uygulamadan çıkışı yakalamak için geçici olarak genişler.
+              void apply() {
+                  try {
+                      AccessibilityServiceInfo i = getServiceInfo();
+                      if (i == null) return;
+                      if (wide) {
+                          i.packageNames = null;
+                      } else {
+                          Set<String> l = Store.load(this);
+                          i.packageNames = l.isEmpty() ? new String[]{"x.lock.none"} : l.toArray(new String[0]);
+                      }
+                      setServiceInfo(i);
+                  } catch (Exception ex) { }
+              }
+
+              void widen() {
+                  wide = true;
+                  apply();
               }
 
               @Override
@@ -110,10 +144,15 @@ jobs:
                   if (Store.isLocked(this, p)) {
                       if (!showing) {
                           showing = true;
+                          unlocked = null;
                           openPin(PinActivity.UNLOCK, p);
                       }
                   } else if (!showing) {
                       unlocked = null;
+                      if (wide) {
+                          wide = false;
+                          apply();
+                      }
                   }
               }
 
@@ -335,7 +374,11 @@ jobs:
               void ok() {
                   done = true;
                   for (View v : dots) bg(v, 0xFF35D07F);
-                  if (mode == UNLOCK) LockService.unlocked = pkg;
+                  if (mode == UNLOCK) {
+                      LockService.unlocked = pkg;
+                      LockService sv = LockService.inst;
+                      if (sv != null) sv.widen();
+                  }
                   setResult(RESULT_OK);
                   if (mode == CREATE_FIRST) {
                       SettingsActivity.fresh = true;
@@ -575,6 +618,8 @@ jobs:
               static void setLocked(Context c, Set<String> s) {
                   cache = new HashSet<String>(s);
                   p(c).edit().putStringSet("l", new HashSet<String>(s)).apply();
+                  LockService sv = LockService.inst;
+                  if (sv != null) sv.apply();
               }
           }
           EOF_X
