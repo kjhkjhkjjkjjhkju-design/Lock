@@ -1,1 +1,623 @@
+name: Lock APK
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Proje dosyalarini olustur
+        run: |
+          mkdir -p p/app/src/main/java/com/vys/lock p/app/src/main/res/values p/app/src/main/res/xml
+          cat > p/app/build.gradle <<'EOF_X'
+          plugins { id 'com.android.application' }
+          android {
+              namespace 'com.vys.lock'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'com.vys.lock'
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          EOF_X
+          cat > p/app/src/main/AndroidManifest.xml <<'EOF_X'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.software.leanback" android:required="false" />
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                  </intent>
+              </queries>
+              <application
+                  android:label="Lock"
+                  android:allowBackup="false"
+                  android:theme="@style/T">
+                  <activity android:name=".SettingsActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.INFO" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".PinActivity" android:exported="false" android:excludeFromRecents="true" />
+                  <service
+                      android:name=".LockService"
+                      android:exported="true"
+                      android:label="Lock"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_X
+          cat > p/app/src/main/java/com/vys/lock/LockService.java <<'EOF_X'
+          package com.vys.lock;
 
+          import android.accessibilityservice.AccessibilityService;
+          import android.content.Intent;
+          import android.view.accessibility.AccessibilityEvent;
+
+          public class LockService extends AccessibilityService {
+              static volatile String unlocked;
+              static volatile boolean showing;
+
+              @Override
+              protected void onServiceConnected() {
+                  if (!Store.hasPin(this)) openPin(PinActivity.CREATE_FIRST, null);
+              }
+
+              @Override
+              public void onAccessibilityEvent(AccessibilityEvent e) {
+                  if (e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+                  CharSequence cs = e.getPackageName();
+                  if (cs == null) return;
+                  String p = cs.toString();
+                  if (p.equals(getPackageName()) || p.equals("com.android.systemui") || p.equals("android")) return;
+                  CharSequence cn = e.getClassName();
+                  if (cn != null && cn.toString().equals("android.inputmethodservice.SoftInputWindow")) return;
+                  if (p.equals(unlocked)) return;
+                  if (Store.isLocked(this, p)) {
+                      if (!showing) {
+                          showing = true;
+                          openPin(PinActivity.UNLOCK, p);
+                      }
+                  } else if (!showing) {
+                      unlocked = null;
+                  }
+              }
+
+              void openPin(int mode, String pkg) {
+                  try {
+                      startActivity(new Intent(this, PinActivity.class)
+                              .putExtra("m", mode).putExtra("p", pkg)
+                              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION
+                                      | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS));
+                  } catch (Exception ex) {
+                      showing = false;
+                  }
+              }
+
+              @Override
+              public void onInterrupt() {}
+          }
+          EOF_X
+          cat > p/app/src/main/java/com/vys/lock/PinActivity.java <<'EOF_X'
+          package com.vys.lock;
+
+          import android.animation.Animator;
+          import android.animation.AnimatorListenerAdapter;
+          import android.animation.ObjectAnimator;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.graphics.drawable.GradientDrawable;
+          import android.graphics.drawable.StateListDrawable;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.KeyEvent;
+          import android.view.View;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class PinActivity extends Activity {
+              static final int UNLOCK = 0, VERIFY = 1, CREATE = 2, CREATE_FIRST = 3;
+              int mode;
+              String pkg, pin = "", first;
+              boolean done, busy;
+              float d;
+              LinearLayout col, dotRow;
+              TextView sub;
+              View[] dots = new View[4];
+
+              int dp(int v) { return (int) (v * d + .5f); }
+
+              GradientDrawable circle(int c) {
+                  GradientDrawable g = new GradientDrawable();
+                  g.setShape(GradientDrawable.OVAL);
+                  g.setColor(c);
+                  return g;
+              }
+
+              void bg(View v, int c) { v.setBackground(circle(c)); }
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  d = getResources().getDisplayMetrics().density;
+                  mode = getIntent().getIntExtra("m", UNLOCK);
+                  pkg = getIntent().getStringExtra("p");
+                  String title = "Lock", subText = "Şifreyi gir";
+                  if (mode == UNLOCK && pkg != null) {
+                      try {
+                          PackageManager pm = getPackageManager();
+                          title = pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString();
+                      } catch (Exception e) { }
+                  } else if (mode >= CREATE) {
+                      title = "Yeni şifre";
+                      subText = "4 haneli bir şifre belirle";
+                  }
+
+                  FrameLayout root = new FrameLayout(this);
+                  col = new LinearLayout(this);
+                  col.setOrientation(LinearLayout.VERTICAL);
+                  col.setGravity(Gravity.CENTER);
+                  root.addView(col, new FrameLayout.LayoutParams(-1, -1));
+
+                  TextView t = new TextView(this);
+                  t.setText(title);
+                  t.setTextSize(30);
+                  t.setTextColor(Color.WHITE);
+                  t.setGravity(Gravity.CENTER);
+                  col.addView(t);
+
+                  sub = new TextView(this);
+                  sub.setText(subText);
+                  sub.setTextSize(16);
+                  sub.setTextColor(0xFF8A98AA);
+                  sub.setGravity(Gravity.CENTER);
+                  LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-2, -2);
+                  sp.setMargins(0, dp(4), 0, dp(14));
+                  col.addView(sub, sp);
+
+                  dotRow = new LinearLayout(this);
+                  dotRow.setGravity(Gravity.CENTER);
+                  for (int i = 0; i < 4; i++) {
+                      View v = new View(this);
+                      bg(v, 0xFF2A3544);
+                      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(14), dp(14));
+                      lp.setMargins(dp(9), 0, dp(9), 0);
+                      dotRow.addView(v, lp);
+                      dots[i] = v;
+                  }
+                  LinearLayout.LayoutParams dp0 = new LinearLayout.LayoutParams(-2, -2);
+                  dp0.setMargins(0, 0, 0, dp(14));
+                  col.addView(dotRow, dp0);
+
+                  String[][] rows = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"←", "0", ""}};
+                  View k5 = null;
+                  for (String[] r : rows) {
+                      LinearLayout row = new LinearLayout(this);
+                      row.setGravity(Gravity.CENTER);
+                      for (String k : r) {
+                          View v = k.isEmpty() ? spacer() : key(k);
+                          if (k.equals("5")) k5 = v;
+                          row.addView(v);
+                      }
+                      col.addView(row);
+                  }
+
+                  TextView c = new TextView(this);
+                  c.setText("Yapımcı:Veysel Alemdar");
+                  c.setTextSize(14);
+                  c.setTextColor(0xFF6B7788);
+                  FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+                  cp.bottomMargin = dp(14);
+                  root.addView(c, cp);
+
+                  setContentView(root);
+                  if (k5 != null) k5.requestFocus();
+
+                  col.setAlpha(0f);
+                  col.setScaleX(.94f);
+                  col.setScaleY(.94f);
+                  col.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(140).start();
+                  overridePendingTransition(0, 0);
+              }
+
+              View spacer() {
+                  View v = new View(this);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
+                  lp.setMargins(dp(6), dp(6), dp(6), dp(6));
+                  v.setLayoutParams(lp);
+                  return v;
+              }
+
+              View key(final String k) {
+                  TextView t = new TextView(this);
+                  t.setText(k);
+                  t.setTextSize(26);
+                  t.setTextColor(Color.WHITE);
+                  t.setGravity(Gravity.CENTER);
+                  t.setFocusable(true);
+                  t.setClickable(true);
+                  StateListDrawable sl = new StateListDrawable();
+                  sl.addState(new int[]{android.R.attr.state_focused}, circle(0xFF3D8BFF));
+                  sl.addState(new int[]{android.R.attr.state_pressed}, circle(0xFF3D8BFF));
+                  sl.addState(new int[]{}, circle(0xFF1B2430));
+                  t.setBackground(sl);
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
+                  lp.setMargins(dp(6), dp(6), dp(6), dp(6));
+                  t.setLayoutParams(lp);
+                  t.setOnClickListener(v -> press(k));
+                  t.setOnFocusChangeListener((v, f) ->
+                          v.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(80).start());
+                  return t;
+              }
+
+              void paint() {
+                  for (int i = 0; i < 4; i++) bg(dots[i], i < pin.length() ? Color.WHITE : 0xFF2A3544);
+              }
+
+              void press(String k) {
+                  if (done || busy) return;
+                  if (k.equals("←")) {
+                      if (!pin.isEmpty()) {
+                          pin = pin.substring(0, pin.length() - 1);
+                          paint();
+                      }
+                      return;
+                  }
+                  if (pin.length() >= 4) return;
+                  pin += k;
+                  paint();
+                  View dv = dots[pin.length() - 1];
+                  dv.setScaleX(.5f);
+                  dv.setScaleY(.5f);
+                  dv.animate().scaleX(1f).scaleY(1f).setDuration(90).start();
+                  if (pin.length() == 4) {
+                      busy = true;
+                      col.postDelayed(this::submit, 90);
+                  }
+              }
+
+              void submit() {
+                  String p = pin;
+                  if (mode == UNLOCK || mode == VERIFY) {
+                      if (Store.check(this, p)) ok(); else bad("Yanlış şifre");
+                  } else if (first == null) {
+                      first = p;
+                      pin = "";
+                      paint();
+                      sub.setText("Şifreyi tekrar gir");
+                      busy = false;
+                  } else if (first.equals(p)) {
+                      Store.setPin(this, p);
+                      ok();
+                  } else {
+                      first = null;
+                      bad("Eşleşmedi, baştan dene");
+                  }
+              }
+
+              void ok() {
+                  done = true;
+                  for (View v : dots) bg(v, 0xFF35D07F);
+                  if (mode == UNLOCK) LockService.unlocked = pkg;
+                  setResult(RESULT_OK);
+                  if (mode == CREATE_FIRST) {
+                      SettingsActivity.fresh = true;
+                      startActivity(new Intent(this, SettingsActivity.class));
+                  }
+                  col.animate().alpha(0f).setDuration(110).withEndAction(() -> {
+                      finish();
+                      overridePendingTransition(0, 0);
+                  }).start();
+              }
+
+              void bad(String m) {
+                  for (View v : dots) bg(v, 0xFFFF5A5F);
+                  sub.setText(m);
+                  ObjectAnimator a = ObjectAnimator.ofFloat(dotRow, "translationX", 0, -dp(14), dp(14), -dp(10), dp(10), 0);
+                  a.setDuration(260);
+                  a.addListener(new AnimatorListenerAdapter() {
+                      @Override
+                      public void onAnimationEnd(Animator x) {
+                          pin = "";
+                          paint();
+                          busy = false;
+                      }
+                  });
+                  a.start();
+              }
+
+              @Override
+              public boolean onKeyDown(int k, KeyEvent e) {
+                  if (k >= KeyEvent.KEYCODE_0 && k <= KeyEvent.KEYCODE_9) {
+                      press(String.valueOf(k - KeyEvent.KEYCODE_0));
+                      return true;
+                  }
+                  if (k >= KeyEvent.KEYCODE_NUMPAD_0 && k <= KeyEvent.KEYCODE_NUMPAD_9) {
+                      press(String.valueOf(k - KeyEvent.KEYCODE_NUMPAD_0));
+                      return true;
+                  }
+                  if (k == KeyEvent.KEYCODE_DEL || k == KeyEvent.KEYCODE_FORWARD_DEL) {
+                      press("←");
+                      return true;
+                  }
+                  return super.onKeyDown(k, e);
+              }
+
+              void goHome() {
+                  try {
+                      startActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                              .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                  } catch (Exception e) { }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (mode == UNLOCK) goHome();
+                  finish();
+                  overridePendingTransition(0, 0);
+              }
+
+              @Override
+              protected void onStop() {
+                  super.onStop();
+                  if (!done && !isFinishing()) {
+                      if (mode == UNLOCK) goHome();
+                      finish();
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  if (mode == UNLOCK) LockService.showing = false;
+              }
+          }
+          EOF_X
+          cat > p/app/src/main/java/com/vys/lock/SettingsActivity.java <<'EOF_X'
+          package com.vys.lock;
+
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ResolveInfo;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.widget.ArrayAdapter;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ListView;
+          import android.widget.TextView;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.HashMap;
+          import java.util.Map;
+          import java.util.Set;
+
+          public class SettingsActivity extends Activity {
+              static volatile boolean fresh;
+              boolean built, busy;
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  if (fresh) {
+                      fresh = false;
+                      build();
+                      return;
+                  }
+                  startActivityForResult(new Intent(this, PinActivity.class)
+                          .putExtra("m", Store.hasPin(this) ? PinActivity.VERIFY : PinActivity.CREATE), 1);
+                  overridePendingTransition(0, 0);
+              }
+
+              @Override
+              protected void onActivityResult(int rq, int rs, Intent data) {
+                  if (rq == 1) {
+                      if (rs == RESULT_OK) build(); else finish();
+                  } else {
+                      busy = false;
+                  }
+              }
+
+              @Override
+              protected void onStop() {
+                  super.onStop();
+                  if (built && !busy && !isFinishing()) finish();
+              }
+
+              void build() {
+                  built = true;
+                  float d = getResources().getDisplayMetrics().density;
+                  int p = (int) (28 * d);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(p, p / 2, p, p / 2);
+
+                  TextView t = new TextView(this);
+                  t.setText("Lock");
+                  t.setTextSize(28);
+                  t.setTextColor(Color.WHITE);
+                  root.addView(t);
+
+                  TextView s = new TextView(this);
+                  s.setText("Kilitlenecek uygulamaları seç");
+                  s.setTextSize(15);
+                  s.setTextColor(0xFF8A98AA);
+                  root.addView(s);
+
+                  Button bt = new Button(this);
+                  bt.setText("Şifreyi değiştir");
+                  bt.setOnClickListener(v -> {
+                      busy = true;
+                      startActivityForResult(new Intent(this, PinActivity.class).putExtra("m", PinActivity.CREATE), 2);
+                  });
+                  root.addView(bt, new LinearLayout.LayoutParams(-2, -2));
+
+                  final ListView lv = new ListView(this);
+                  root.addView(lv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+                  TextView c = new TextView(this);
+                  c.setText("Yapımcı:Veysel Alemdar");
+                  c.setGravity(Gravity.CENTER);
+                  c.setTextSize(13);
+                  c.setTextColor(0xFF6B7788);
+                  root.addView(c, new LinearLayout.LayoutParams(-1, -2));
+
+                  PackageManager pm = getPackageManager();
+                  HashMap<String, String> m = new HashMap<String, String>();
+                  String[] cats = {Intent.CATEGORY_LAUNCHER, Intent.CATEGORY_LEANBACK_LAUNCHER};
+                  for (String cat : cats) {
+                      for (ResolveInfo r : pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(cat), 0)) {
+                          String pk = r.activityInfo.packageName;
+                          if (!pk.equals(getPackageName())) m.put(pk, r.loadLabel(pm).toString());
+                      }
+                  }
+                  final ArrayList<String[]> apps = new ArrayList<String[]>();
+                  for (Map.Entry<String, String> e : m.entrySet()) apps.add(new String[]{e.getValue(), e.getKey()});
+                  Collections.sort(apps, (x, y) -> x[0].compareToIgnoreCase(y[0]));
+                  String[] names = new String[apps.size()];
+                  for (int i = 0; i < names.length; i++) names[i] = apps.get(i)[0];
+
+                  lv.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
+                  lv.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_multiple_choice, names));
+                  Set<String> sel = Store.locked(this);
+                  for (int i = 0; i < names.length; i++) lv.setItemChecked(i, sel.contains(apps.get(i)[1]));
+                  lv.setOnItemClickListener((a, v, i, id) -> {
+                      Set<String> cur = Store.locked(this);
+                      if (lv.isItemChecked(i)) cur.add(apps.get(i)[1]); else cur.remove(apps.get(i)[1]);
+                      Store.setLocked(this, cur);
+                  });
+
+                  setContentView(root);
+              }
+          }
+          EOF_X
+          cat > p/app/src/main/java/com/vys/lock/Store.java <<'EOF_X'
+          package com.vys.lock;
+
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import java.security.MessageDigest;
+          import java.util.HashSet;
+          import java.util.Set;
+
+          final class Store {
+              static volatile Set<String> cache;
+
+              static SharedPreferences p(Context c) { return c.getSharedPreferences("s", 0); }
+
+              static boolean hasPin(Context c) { return p(c).getString("h", null) != null; }
+
+              static String hash(String pin) {
+                  try {
+                      byte[] b = MessageDigest.getInstance("SHA-256").digest(("vys-lock:" + pin).getBytes("UTF-8"));
+                      StringBuilder s = new StringBuilder();
+                      for (byte x : b) s.append(String.format("%02x", x));
+                      return s.toString();
+                  } catch (Exception e) { return ""; }
+              }
+
+              static void setPin(Context c, String pin) { p(c).edit().putString("h", hash(pin)).apply(); }
+
+              static boolean check(Context c, String pin) { return hash(pin).equals(p(c).getString("h", "")); }
+
+              static Set<String> load(Context c) {
+                  Set<String> s = cache;
+                  if (s == null) {
+                      s = new HashSet<String>(p(c).getStringSet("l", new HashSet<String>()));
+                      cache = s;
+                  }
+                  return s;
+              }
+
+              static boolean isLocked(Context c, String pkg) { return load(c).contains(pkg); }
+
+              static Set<String> locked(Context c) { return new HashSet<String>(load(c)); }
+
+              static void setLocked(Context c, Set<String> s) {
+                  cache = new HashSet<String>(s);
+                  p(c).edit().putStringSet("l", new HashSet<String>(s)).apply();
+              }
+          }
+          EOF_X
+          cat > p/app/src/main/res/values/values.xml <<'EOF_X'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="desc">Seçtiğin uygulamaları şifreyle kilitler.</string>
+              <style name="T" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#FF0B0F14</item>
+                  <item name="android:windowAnimationStyle">@null</item>
+              </style>
+          </resources>
+          EOF_X
+          cat > p/app/src/main/res/xml/accessibility.xml <<'EOF_X'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="0"
+              android:description="@string/desc"
+              android:settingsActivity="com.vys.lock.SettingsActivity" />
+          EOF_X
+          cat > p/build.gradle <<'EOF_X'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          EOF_X
+          cat > p/settings.gradle <<'EOF_X'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Lock"
+          include ":app"
+          EOF_X
+      - name: Derle
+        working-directory: p
+        run: gradle assembleDebug --no-daemon
+      - name: APK yayinla
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp p/app/build/outputs/apk/debug/app-debug.apk Lock.apk
+          gh release create "v${{ github.run_number }}" Lock.apk --title "Lock ${{ github.run_number }}" --notes "Lock APK"
