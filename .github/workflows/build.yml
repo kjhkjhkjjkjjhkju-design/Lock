@@ -52,6 +52,10 @@ jobs:
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                   </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.HOME" />
+                  </intent>
               </queries>
               <application
                   android:label="Lock"
@@ -87,8 +91,9 @@ jobs:
           import android.accessibilityservice.AccessibilityService;
           import android.accessibilityservice.AccessibilityServiceInfo;
           import android.content.Intent;
+          import android.content.pm.ResolveInfo;
           import android.view.accessibility.AccessibilityEvent;
-          import java.util.Set;
+          import java.util.LinkedHashSet;
 
           public class LockService extends AccessibilityService {
               static volatile String unlocked;
@@ -110,17 +115,32 @@ jobs:
                   return super.onUnbind(i);
               }
 
-              // Normalde sadece kilitli uygulamaların olayları gelir; kilit açılınca
-              // uygulamadan çıkışı yakalamak için geçici olarak genişler.
+              String[] homes() {
+                  try {
+                      LinkedHashSet<String> s = new LinkedHashSet<String>();
+                      for (ResolveInfo r : getPackageManager().queryIntentActivities(
+                              new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)) {
+                          s.add(r.activityInfo.packageName);
+                      }
+                      return s.toArray(new String[0]);
+                  } catch (Exception e) {
+                      return new String[0];
+                  }
+              }
+
+              // Dinlenen paketler: kilitli uygulamalar + ana ekran (çıkışı yakalamak için).
+              // Kilit açıkken geçici olarak tüm paketler dinlenir.
               void apply() {
                   try {
                       AccessibilityServiceInfo i = getServiceInfo();
                       if (i == null) return;
-                      if (wide) {
+                      String[] h = homes();
+                      if (wide || h.length == 0) {
                           i.packageNames = null;
                       } else {
-                          Set<String> l = Store.load(this);
-                          i.packageNames = l.isEmpty() ? new String[]{"x.lock.none"} : l.toArray(new String[0]);
+                          LinkedHashSet<String> n = new LinkedHashSet<String>(Store.load(this));
+                          for (String x : h) n.add(x);
+                          i.packageNames = n.toArray(new String[0]);
                       }
                       setServiceInfo(i);
                   } catch (Exception ex) { }
@@ -133,27 +153,29 @@ jobs:
 
               @Override
               public void onAccessibilityEvent(AccessibilityEvent e) {
-                  if (e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
-                  CharSequence cs = e.getPackageName();
-                  if (cs == null) return;
-                  String p = cs.toString();
-                  if (p.equals(getPackageName()) || p.equals("com.android.systemui") || p.equals("android")) return;
-                  CharSequence cn = e.getClassName();
-                  if (cn != null && cn.toString().equals("android.inputmethodservice.SoftInputWindow")) return;
-                  if (p.equals(unlocked)) return;
-                  if (Store.isLocked(this, p)) {
-                      if (!showing) {
-                          showing = true;
+                  try {
+                      if (e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
+                      CharSequence cs = e.getPackageName();
+                      if (cs == null) return;
+                      String p = cs.toString();
+                      if (p.equals(getPackageName()) || p.equals("com.android.systemui") || p.equals("android")) return;
+                      CharSequence cn = e.getClassName();
+                      if (cn != null && cn.toString().equals("android.inputmethodservice.SoftInputWindow")) return;
+                      if (p.equals(unlocked)) return;
+                      if (Store.isLocked(this, p)) {
+                          if (!showing) {
+                              showing = true;
+                              unlocked = null;
+                              openPin(PinActivity.UNLOCK, p);
+                          }
+                      } else {
                           unlocked = null;
-                          openPin(PinActivity.UNLOCK, p);
+                          if (wide && !showing) {
+                              wide = false;
+                              apply();
+                          }
                       }
-                  } else if (!showing) {
-                      unlocked = null;
-                      if (wide) {
-                          wide = false;
-                          apply();
-                      }
-                  }
+                  } catch (Exception ex) { }
               }
 
               void openPin(int mode, String pkg) {
@@ -178,9 +200,12 @@ jobs:
           import android.animation.AnimatorListenerAdapter;
           import android.animation.ObjectAnimator;
           import android.app.Activity;
+          import android.content.Context;
           import android.content.Intent;
           import android.content.pm.PackageManager;
+          import android.graphics.Canvas;
           import android.graphics.Color;
+          import android.graphics.Paint;
           import android.graphics.drawable.GradientDrawable;
           import android.graphics.drawable.StateListDrawable;
           import android.os.Bundle;
@@ -210,7 +235,19 @@ jobs:
                   return g;
               }
 
-              void bg(View v, int c) { v.setBackground(circle(c)); }
+              void bg(View v, int c) {
+                  if (v instanceof Dot) ((Dot) v).set(c); else v.setBackground(circle(c));
+              }
+
+              static class Dot extends View {
+                  final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  Dot(Context c) { super(c); }
+                  void set(int c) { p.setColor(c); invalidate(); }
+                  @Override protected void onDraw(Canvas cv) {
+                      float r = getWidth() / 2f;
+                      cv.drawCircle(r, getHeight() / 2f, r, p);
+                  }
+              }
 
               @Override
               protected void onCreate(Bundle b) {
@@ -254,8 +291,8 @@ jobs:
                   dotRow = new LinearLayout(this);
                   dotRow.setGravity(Gravity.CENTER);
                   for (int i = 0; i < 4; i++) {
-                      View v = new View(this);
-                      bg(v, 0xFF2A3544);
+                      Dot v = new Dot(this);
+                      v.set(0xFF2A3544);
                       LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(14), dp(14));
                       lp.setMargins(dp(9), 0, dp(9), 0);
                       dotRow.addView(v, lp);
@@ -376,6 +413,7 @@ jobs:
                   for (View v : dots) bg(v, 0xFF35D07F);
                   if (mode == UNLOCK) {
                       LockService.unlocked = pkg;
+                      LockService.showing = false;
                       LockService sv = LockService.inst;
                       if (sv != null) sv.widen();
                   }
@@ -432,7 +470,10 @@ jobs:
 
               @Override
               public void onBackPressed() {
-                  if (mode == UNLOCK) goHome();
+                  if (mode == UNLOCK) {
+                      LockService.showing = false;
+                      goHome();
+                  }
                   finish();
                   overridePendingTransition(0, 0);
               }
@@ -440,6 +481,7 @@ jobs:
               @Override
               protected void onStop() {
                   super.onStop();
+                  if (mode == UNLOCK) LockService.showing = false;
                   if (!done && !isFinishing()) {
                       if (mode == UNLOCK) goHome();
                       finish();
