@@ -327,8 +327,10 @@ jobs:
                           } else {
                               Key key = new Key(this, k, ts);
                               key.setOnClickListener(x -> press(k));
+                              // Tıklanabilir görünümler Android 8+ sürümünde otomatik odaklanabilir olur;
+                              // modern modda odak sadece bizim satır işaretimizdir.
+                              key.setFocusable(!modern);
                               if (!modern) {
-                                  key.setFocusable(true);
                                   key.setOnFocusChangeListener((x, f) ->
                                           x.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(80).start());
                               }
