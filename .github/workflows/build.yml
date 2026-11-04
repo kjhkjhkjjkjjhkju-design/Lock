@@ -29,8 +29,19 @@ jobs:
                   applicationId 'com.vys.lock'
                   minSdk 21
                   targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '2.0'
+              }
+              buildTypes {
+                  release {
+                      minifyEnabled true
+                      shrinkResources true
+                      signingConfig signingConfigs.debug
+                  }
+              }
+              lint {
+                  checkReleaseBuilds false
+                  abortOnError false
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_1_8
@@ -51,10 +62,6 @@ jobs:
                   <intent>
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
-                  </intent>
-                  <intent>
-                      <action android:name="android.intent.action.MAIN" />
-                      <category android:name="android.intent.category.HOME" />
                   </intent>
               </queries>
               <application
@@ -100,11 +107,20 @@ jobs:
               static volatile boolean showing;
               static volatile LockService inst;
               volatile boolean wide;
+              String[] homes = new String[0];
 
               @Override
               protected void onServiceConnected() {
                   inst = this;
                   wide = false;
+                  try {
+                      LinkedHashSet<String> s = new LinkedHashSet<String>();
+                      for (ResolveInfo r : getPackageManager().queryIntentActivities(
+                              new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)) {
+                          s.add(r.activityInfo.packageName);
+                      }
+                      homes = s.toArray(new String[0]);
+                  } catch (Exception e) { }
                   apply();
                   if (!Store.hasPin(this)) openPin(PinActivity.CREATE_FIRST, null);
               }
@@ -115,31 +131,16 @@ jobs:
                   return super.onUnbind(i);
               }
 
-              String[] homes() {
-                  try {
-                      LinkedHashSet<String> s = new LinkedHashSet<String>();
-                      for (ResolveInfo r : getPackageManager().queryIntentActivities(
-                              new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)) {
-                          s.add(r.activityInfo.packageName);
-                      }
-                      return s.toArray(new String[0]);
-                  } catch (Exception e) {
-                      return new String[0];
-                  }
-              }
-
-              // Dinlenen paketler: kilitli uygulamalar + ana ekran (çıkışı yakalamak için).
-              // Kilit açıkken geçici olarak tüm paketler dinlenir.
+              // Dinlenen paketler: kilitli uygulamalar + ana ekran. Kilit açıkken geçici olarak hepsi.
               void apply() {
                   try {
                       AccessibilityServiceInfo i = getServiceInfo();
                       if (i == null) return;
-                      String[] h = homes();
-                      if (wide || h.length == 0) {
+                      if (wide || homes.length == 0) {
                           i.packageNames = null;
                       } else {
                           LinkedHashSet<String> n = new LinkedHashSet<String>(Store.load(this));
-                          for (String x : h) n.add(x);
+                          for (String x : homes) n.add(x);
                           i.packageNames = n.toArray(new String[0]);
                       }
                       setServiceInfo(i);
@@ -154,7 +155,6 @@ jobs:
               @Override
               public void onAccessibilityEvent(AccessibilityEvent e) {
                   try {
-                      if (e.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return;
                       CharSequence cs = e.getPackageName();
                       if (cs == null) return;
                       String p = cs.toString();
@@ -206,8 +206,6 @@ jobs:
           import android.graphics.Canvas;
           import android.graphics.Color;
           import android.graphics.Paint;
-          import android.graphics.drawable.GradientDrawable;
-          import android.graphics.drawable.StateListDrawable;
           import android.os.Bundle;
           import android.view.Gravity;
           import android.view.KeyEvent;
@@ -218,30 +216,21 @@ jobs:
 
           public class PinActivity extends Activity {
               static final int UNLOCK = 0, VERIFY = 1, CREATE = 2, CREATE_FIRST = 3;
-              int mode;
+              static final String[][] ROWS = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"←", "0", ""}};
+              int mode, row;
               String pkg, pin = "", first;
-              boolean done, busy;
+              boolean done, busy, modern;
               float d;
               LinearLayout col, dotRow;
               TextView sub;
-              View[] dots = new View[4];
+              Dot[] dots = new Dot[4];
+              Key[][] cells = new Key[4][3];
 
               int dp(int v) { return (int) (v * d + .5f); }
 
-              GradientDrawable circle(int c) {
-                  GradientDrawable g = new GradientDrawable();
-                  g.setShape(GradientDrawable.OVAL);
-                  g.setColor(c);
-                  return g;
-              }
-
-              void bg(View v, int c) {
-                  if (v instanceof Dot) ((Dot) v).set(c); else v.setBackground(circle(c));
-              }
-
               static class Dot extends View {
                   final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                  Dot(Context c) { super(c); }
+                  Dot(Context c) { super(c); set(0xFF2A3544); }
                   void set(int c) { p.setColor(c); invalidate(); }
                   @Override protected void onDraw(Canvas cv) {
                       float r = getWidth() / 2f;
@@ -249,10 +238,35 @@ jobs:
                   }
               }
 
+              static class Key extends View {
+                  final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG), tx = new Paint(Paint.ANTI_ALIAS_FLAG);
+                  final String label;
+                  int tone;
+                  Key(Context c, String l, float ts) {
+                      super(c);
+                      label = l;
+                      tx.setColor(Color.WHITE);
+                      tx.setTextSize(ts);
+                      tx.setTextAlign(Paint.Align.CENTER);
+                  }
+                  @Override protected void drawableStateChanged() {
+                      super.drawableStateChanged();
+                      invalidate();
+                  }
+                  @Override protected void onDraw(Canvas cv) {
+                      int c = (isFocused() || isPressed() || tone == 2) ? 0xFF3D8BFF : tone == 1 ? 0xFF24456F : 0xFF1B2430;
+                      bg.setColor(c);
+                      float r = getWidth() / 2f, y = getHeight() / 2f;
+                      cv.drawCircle(r, y, r, bg);
+                      cv.drawText(label, r, y - (tx.ascent() + tx.descent()) / 2f, tx);
+                  }
+              }
+
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
                   d = getResources().getDisplayMetrics().density;
+                  modern = Store.modern(this);
                   mode = getIntent().getIntExtra("m", UNLOCK);
                   pkg = getIntent().getStringExtra("p");
                   String title = "Lock", subText = "Şifreyi gir";
@@ -292,27 +306,40 @@ jobs:
                   dotRow.setGravity(Gravity.CENTER);
                   for (int i = 0; i < 4; i++) {
                       Dot v = new Dot(this);
-                      v.set(0xFF2A3544);
                       LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(14), dp(14));
                       lp.setMargins(dp(9), 0, dp(9), 0);
                       dotRow.addView(v, lp);
                       dots[i] = v;
                   }
-                  LinearLayout.LayoutParams dp0 = new LinearLayout.LayoutParams(-2, -2);
-                  dp0.setMargins(0, 0, 0, dp(14));
-                  col.addView(dotRow, dp0);
+                  LinearLayout.LayoutParams dl = new LinearLayout.LayoutParams(-2, -2);
+                  dl.setMargins(0, 0, 0, dp(14));
+                  col.addView(dotRow, dl);
 
-                  String[][] rows = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"←", "0", ""}};
-                  View k5 = null;
-                  for (String[] r : rows) {
-                      LinearLayout row = new LinearLayout(this);
-                      row.setGravity(Gravity.CENTER);
-                      for (String k : r) {
-                          View v = k.isEmpty() ? spacer() : key(k);
-                          if (k.equals("5")) k5 = v;
-                          row.addView(v);
+                  float ts = 26 * getResources().getDisplayMetrics().scaledDensity;
+                  for (int r = 0; r < 4; r++) {
+                      LinearLayout line = new LinearLayout(this);
+                      line.setGravity(Gravity.CENTER);
+                      for (int c = 0; c < 3; c++) {
+                          final String k = ROWS[r][c];
+                          View v;
+                          if (k.isEmpty()) {
+                              v = new View(this);
+                          } else {
+                              Key key = new Key(this, k, ts);
+                              key.setOnClickListener(x -> press(k));
+                              if (!modern) {
+                                  key.setFocusable(true);
+                                  key.setOnFocusChangeListener((x, f) ->
+                                          x.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(80).start());
+                              }
+                              cells[r][c] = key;
+                              v = key;
+                          }
+                          LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
+                          lp.setMargins(dp(6), dp(6), dp(6), dp(6));
+                          line.addView(v, lp);
                       }
-                      col.addView(row);
+                      col.addView(line);
                   }
 
                   TextView c = new TextView(this);
@@ -324,7 +351,7 @@ jobs:
                   root.addView(c, cp);
 
                   setContentView(root);
-                  if (k5 != null) k5.requestFocus();
+                  if (modern) mark(); else cells[1][1].requestFocus();
 
                   col.setAlpha(0f);
                   col.setScaleX(.94f);
@@ -333,42 +360,25 @@ jobs:
                   overridePendingTransition(0, 0);
               }
 
-              View spacer() {
-                  View v = new View(this);
-                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
-                  lp.setMargins(dp(6), dp(6), dp(6), dp(6));
-                  v.setLayoutParams(lp);
-                  return v;
-              }
-
-              View key(final String k) {
-                  TextView t = new TextView(this);
-                  t.setText(k);
-                  t.setTextSize(26);
-                  t.setTextColor(Color.WHITE);
-                  t.setGravity(Gravity.CENTER);
-                  t.setFocusable(true);
-                  t.setClickable(true);
-                  StateListDrawable sl = new StateListDrawable();
-                  sl.addState(new int[]{android.R.attr.state_focused}, circle(0xFF3D8BFF));
-                  sl.addState(new int[]{android.R.attr.state_pressed}, circle(0xFF3D8BFF));
-                  sl.addState(new int[]{}, circle(0xFF1B2430));
-                  t.setBackground(sl);
-                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
-                  lp.setMargins(dp(6), dp(6), dp(6), dp(6));
-                  t.setLayoutParams(lp);
-                  t.setOnClickListener(v -> press(k));
-                  t.setOnFocusChangeListener((v, f) ->
-                          v.animate().scaleX(f ? 1.12f : 1f).scaleY(f ? 1.12f : 1f).setDuration(80).start());
-                  return t;
+              // Modern mod: aktif satırın sol/orta/sağ tuşları vurgulanır.
+              void mark() {
+                  for (int r = 0; r < 4; r++) {
+                      for (int c = 0; c < 3; c++) {
+                          Key k = cells[r][c];
+                          if (k != null) {
+                              k.tone = r == row ? (c == 1 ? 2 : 1) : 0;
+                              k.invalidate();
+                          }
+                      }
+                  }
               }
 
               void paint() {
-                  for (int i = 0; i < 4; i++) bg(dots[i], i < pin.length() ? Color.WHITE : 0xFF2A3544);
+                  for (int i = 0; i < 4; i++) dots[i].set(i < pin.length() ? Color.WHITE : 0xFF2A3544);
               }
 
               void press(String k) {
-                  if (done || busy) return;
+                  if (done || busy || k.isEmpty()) return;
                   if (k.equals("←")) {
                       if (!pin.isEmpty()) {
                           pin = pin.substring(0, pin.length() - 1);
@@ -410,7 +420,7 @@ jobs:
 
               void ok() {
                   done = true;
-                  for (View v : dots) bg(v, 0xFF35D07F);
+                  for (Dot x : dots) x.set(0xFF35D07F);
                   if (mode == UNLOCK) {
                       LockService.unlocked = pkg;
                       LockService.showing = false;
@@ -429,7 +439,7 @@ jobs:
               }
 
               void bad(String m) {
-                  for (View v : dots) bg(v, 0xFFFF5A5F);
+                  for (Dot x : dots) x.set(0xFFFF5A5F);
                   sub.setText(m);
                   ObjectAnimator a = ObjectAnimator.ofFloat(dotRow, "translationX", 0, -dp(14), dp(14), -dp(10), dp(10), 0);
                   a.setDuration(260);
@@ -446,17 +456,43 @@ jobs:
 
               @Override
               public boolean onKeyDown(int k, KeyEvent e) {
+                  boolean first = e.getRepeatCount() == 0;
                   if (k >= KeyEvent.KEYCODE_0 && k <= KeyEvent.KEYCODE_9) {
-                      press(String.valueOf(k - KeyEvent.KEYCODE_0));
+                      if (first) press(String.valueOf(k - KeyEvent.KEYCODE_0));
                       return true;
                   }
                   if (k >= KeyEvent.KEYCODE_NUMPAD_0 && k <= KeyEvent.KEYCODE_NUMPAD_9) {
-                      press(String.valueOf(k - KeyEvent.KEYCODE_NUMPAD_0));
+                      if (first) press(String.valueOf(k - KeyEvent.KEYCODE_NUMPAD_0));
                       return true;
                   }
                   if (k == KeyEvent.KEYCODE_DEL || k == KeyEvent.KEYCODE_FORWARD_DEL) {
-                      press("←");
+                      if (first) press("←");
                       return true;
+                  }
+                  if (modern) {
+                      switch (k) {
+                          case KeyEvent.KEYCODE_DPAD_LEFT:
+                              if (first) press(ROWS[row][0]);
+                              return true;
+                          case KeyEvent.KEYCODE_DPAD_CENTER:
+                          case KeyEvent.KEYCODE_ENTER:
+                          case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                              if (first) press(ROWS[row][1]);
+                              return true;
+                          case KeyEvent.KEYCODE_DPAD_RIGHT:
+                              if (first) press(ROWS[row][2]);
+                              return true;
+                          case KeyEvent.KEYCODE_DPAD_UP:
+                              row = (row + 3) & 3;
+                              mark();
+                              return true;
+                          case KeyEvent.KEYCODE_DPAD_DOWN:
+                              row = (row + 1) & 3;
+                              mark();
+                              return true;
+                          default:
+                              break;
+                      }
                   }
                   return super.onKeyDown(k, e);
               }
@@ -548,13 +584,15 @@ jobs:
                   if (built && !busy && !isFinishing()) finish();
               }
 
+              String modeText() { return Store.modern(this) ? "Mod: Modern" : "Mod: Klasik"; }
+
               void build() {
                   built = true;
                   float d = getResources().getDisplayMetrics().density;
-                  int p = (int) (28 * d);
+                  int pad = (int) (28 * d);
                   LinearLayout root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(p, p / 2, p, p / 2);
+                  root.setPadding(pad, pad / 2, pad, pad / 2);
 
                   TextView t = new TextView(this);
                   t.setText("Lock");
@@ -568,13 +606,22 @@ jobs:
                   s.setTextColor(0xFF8A98AA);
                   root.addView(s);
 
+                  LinearLayout bar = new LinearLayout(this);
                   Button bt = new Button(this);
                   bt.setText("Şifreyi değiştir");
                   bt.setOnClickListener(v -> {
                       busy = true;
                       startActivityForResult(new Intent(this, PinActivity.class).putExtra("m", PinActivity.CREATE), 2);
                   });
-                  root.addView(bt, new LinearLayout.LayoutParams(-2, -2));
+                  bar.addView(bt, new LinearLayout.LayoutParams(-2, -2));
+                  Button bm = new Button(this);
+                  bm.setText(modeText());
+                  bm.setOnClickListener(v -> {
+                      Store.setModern(this, !Store.modern(this));
+                      ((Button) v).setText(modeText());
+                  });
+                  bar.addView(bm, new LinearLayout.LayoutParams(-2, -2));
+                  root.addView(bar, new LinearLayout.LayoutParams(-2, -2));
 
                   final ListView lv = new ListView(this);
                   root.addView(lv, new LinearLayout.LayoutParams(-1, 0, 1f));
@@ -586,32 +633,37 @@ jobs:
                   c.setTextColor(0xFF6B7788);
                   root.addView(c, new LinearLayout.LayoutParams(-1, -2));
 
-                  PackageManager pm = getPackageManager();
-                  HashMap<String, String> m = new HashMap<String, String>();
-                  String[] cats = {Intent.CATEGORY_LAUNCHER, Intent.CATEGORY_LEANBACK_LAUNCHER};
-                  for (String cat : cats) {
-                      for (ResolveInfo r : pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(cat), 0)) {
-                          String pk = r.activityInfo.packageName;
-                          if (!pk.equals(getPackageName())) m.put(pk, r.loadLabel(pm).toString());
-                      }
-                  }
-                  final ArrayList<String[]> apps = new ArrayList<String[]>();
-                  for (Map.Entry<String, String> e : m.entrySet()) apps.add(new String[]{e.getValue(), e.getKey()});
-                  Collections.sort(apps, (x, y) -> x[0].compareToIgnoreCase(y[0]));
-                  String[] names = new String[apps.size()];
-                  for (int i = 0; i < names.length; i++) names[i] = apps.get(i)[0];
-
-                  lv.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
-                  lv.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_multiple_choice, names));
-                  Set<String> sel = Store.locked(this);
-                  for (int i = 0; i < names.length; i++) lv.setItemChecked(i, sel.contains(apps.get(i)[1]));
-                  lv.setOnItemClickListener((a, v, i, id) -> {
-                      Set<String> cur = Store.locked(this);
-                      if (lv.isItemChecked(i)) cur.add(apps.get(i)[1]); else cur.remove(apps.get(i)[1]);
-                      Store.setLocked(this, cur);
-                  });
-
                   setContentView(root);
+
+                  // Uygulama listesi arka planda yüklenir, ekran anında açılır.
+                  new Thread(() -> {
+                      PackageManager pm = getPackageManager();
+                      HashMap<String, String> m = new HashMap<String, String>();
+                      String[] cats = {Intent.CATEGORY_LAUNCHER, Intent.CATEGORY_LEANBACK_LAUNCHER};
+                      for (String cat : cats) {
+                          for (ResolveInfo r : pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN).addCategory(cat), 0)) {
+                              String pk = r.activityInfo.packageName;
+                              if (!pk.equals(getPackageName())) m.put(pk, r.loadLabel(pm).toString());
+                          }
+                      }
+                      final ArrayList<String[]> apps = new ArrayList<String[]>();
+                      for (Map.Entry<String, String> e : m.entrySet()) apps.add(new String[]{e.getValue(), e.getKey()});
+                      Collections.sort(apps, (x, y) -> x[0].compareToIgnoreCase(y[0]));
+                      final String[] names = new String[apps.size()];
+                      for (int n = 0; n < names.length; n++) names[n] = apps.get(n)[0];
+                      runOnUiThread(() -> {
+                          if (isFinishing()) return;
+                          lv.setChoiceMode(ListView.CHOICE_MODE_MULTIPLE);
+                          lv.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_multiple_choice, names));
+                          Set<String> sel = Store.locked(this);
+                          for (int n = 0; n < names.length; n++) lv.setItemChecked(n, sel.contains(apps.get(n)[1]));
+                          lv.setOnItemClickListener((a, v, pos, id) -> {
+                              Set<String> cur = Store.locked(this);
+                              if (lv.isItemChecked(pos)) cur.add(apps.get(pos)[1]); else cur.remove(apps.get(pos)[1]);
+                              Store.setLocked(this, cur);
+                          });
+                      });
+                  }).start();
               }
           }
           EOF_X
@@ -629,20 +681,28 @@ jobs:
 
               static SharedPreferences p(Context c) { return c.getSharedPreferences("s", 0); }
 
-              static boolean hasPin(Context c) { return p(c).getString("h", null) != null; }
+              static boolean hasPin(Context c) { return p(c).contains("h"); }
 
               static String hash(String pin) {
                   try {
                       byte[] b = MessageDigest.getInstance("SHA-256").digest(("vys-lock:" + pin).getBytes("UTF-8"));
-                      StringBuilder s = new StringBuilder();
-                      for (byte x : b) s.append(String.format("%02x", x));
-                      return s.toString();
+                      String h = "0123456789abcdef";
+                      char[] o = new char[b.length * 2];
+                      for (int i = 0; i < b.length; i++) {
+                          o[2 * i] = h.charAt((b[i] >> 4) & 15);
+                          o[2 * i + 1] = h.charAt(b[i] & 15);
+                      }
+                      return new String(o);
                   } catch (Exception e) { return ""; }
               }
 
               static void setPin(Context c, String pin) { p(c).edit().putString("h", hash(pin)).apply(); }
 
               static boolean check(Context c, String pin) { return hash(pin).equals(p(c).getString("h", "")); }
+
+              static boolean modern(Context c) { return p(c).getBoolean("md", false); }
+
+              static void setModern(Context c, boolean b) { p(c).edit().putBoolean("md", b).apply(); }
 
               static Set<String> load(Context c) {
                   Set<String> s = cache;
@@ -680,7 +740,7 @@ jobs:
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowStateChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
-              android:canRetrieveWindowContent="true"
+              android:canRetrieveWindowContent="false"
               android:notificationTimeout="0"
               android:description="@string/desc"
               android:settingsActivity="com.vys.lock.SettingsActivity" />
@@ -700,10 +760,10 @@ jobs:
           EOF_X
       - name: Derle
         working-directory: p
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleRelease --no-daemon
       - name: APK yayinla
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp p/app/build/outputs/apk/debug/app-debug.apk Lock.apk
+          cp p/app/build/outputs/apk/release/app-release.apk Lock.apk
           gh release create "v${{ github.run_number }}" Lock.apk --title "Lock ${{ github.run_number }}" --notes "Lock APK"
