@@ -52,6 +52,8 @@ jobs:
           cat > p/app/src/main/AndroidManifest.xml <<'EOF_X'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <permission android:name="com.vys.lock.permission.IPC" android:protectionLevel="signature" />
+              <uses-permission android:name="com.vys.lock.permission.IPC" />
               <uses-feature android:name="android.software.leanback" android:required="false" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
               <queries>
@@ -68,7 +70,7 @@ jobs:
                   android:label="Lock"
                   android:allowBackup="false"
                   android:theme="@style/T">
-                  <activity android:name=".SettingsActivity" android:exported="true">
+                  <activity android:name=".SettingsActivity" android:exported="true" android:process=":ui">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.INFO" />
@@ -78,7 +80,7 @@ jobs:
                           <category android:name="android.intent.category.DEFAULT" />
                       </intent-filter>
                   </activity>
-                  <activity android:name=".PinActivity" android:exported="false" android:excludeFromRecents="true" />
+                  <activity android:name=".PinActivity" android:exported="false" android:excludeFromRecents="true" android:process=":ui" android:hardwareAccelerated="false" />
                   <service
                       android:name=".LockService"
                       android:exported="true"
@@ -97,21 +99,45 @@ jobs:
 
           import android.accessibilityservice.AccessibilityService;
           import android.accessibilityservice.AccessibilityServiceInfo;
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
           import android.content.Intent;
+          import android.content.IntentFilter;
           import android.content.pm.ResolveInfo;
+          import android.os.Build;
           import android.view.accessibility.AccessibilityEvent;
+          import java.util.HashSet;
           import java.util.LinkedHashSet;
 
           public class LockService extends AccessibilityService {
               static volatile String unlocked;
               static volatile boolean showing;
-              static volatile LockService inst;
-              volatile boolean wide;
+              boolean wide, reg;
               String[] homes = new String[0];
+
+              final BroadcastReceiver rx = new BroadcastReceiver() {
+                  @Override
+                  public void onReceive(Context c, Intent i) {
+                      int t = i.getIntExtra("t", 0);
+                      if (t == 1) {
+                          unlocked = i.getStringExtra("p");
+                          showing = false;
+                          wide = true;
+                          apply();
+                      } else if (t == 2) {
+                          showing = false;
+                      } else if (t == 3) {
+                          HashSet<String> s = new HashSet<String>();
+                          String[] l = i.getStringArrayExtra("l");
+                          if (l != null) for (String x : l) s.add(x);
+                          Store.cache = s;
+                          apply();
+                      }
+                  }
+              };
 
               @Override
               protected void onServiceConnected() {
-                  inst = this;
                   wide = false;
                   try {
                       LinkedHashSet<String> s = new LinkedHashSet<String>();
@@ -121,13 +147,25 @@ jobs:
                       }
                       homes = s.toArray(new String[0]);
                   } catch (Exception e) { }
+                  if (!reg) {
+                      IntentFilter f = new IntentFilter(Store.ACT);
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          registerReceiver(rx, f, Store.PERM, null, Context.RECEIVER_NOT_EXPORTED);
+                      } else {
+                          registerReceiver(rx, f, Store.PERM, null);
+                      }
+                      reg = true;
+                  }
                   apply();
                   if (!Store.hasPin(this)) openPin(PinActivity.CREATE_FIRST, null);
               }
 
               @Override
               public boolean onUnbind(Intent i) {
-                  inst = null;
+                  if (reg) {
+                      reg = false;
+                      try { unregisterReceiver(rx); } catch (Exception e) { }
+                  }
                   return super.onUnbind(i);
               }
 
@@ -139,17 +177,12 @@ jobs:
                       if (wide || homes.length == 0) {
                           i.packageNames = null;
                       } else {
-                          LinkedHashSet<String> n = new LinkedHashSet<String>(Store.load(this));
+                          LinkedHashSet<String> n = new LinkedHashSet<String>(Store.current(this));
                           for (String x : homes) n.add(x);
                           i.packageNames = n.toArray(new String[0]);
                       }
                       setServiceInfo(i);
                   } catch (Exception ex) { }
-              }
-
-              void widen() {
-                  wide = true;
-                  apply();
               }
 
               @Override
@@ -265,6 +298,7 @@ jobs:
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
+                  Store.up();
                   d = getResources().getDisplayMetrics().density;
                   modern = Store.modern(this);
                   mode = getIntent().getIntExtra("m", UNLOCK);
@@ -284,7 +318,7 @@ jobs:
                   col = new LinearLayout(this);
                   col.setOrientation(LinearLayout.VERTICAL);
                   col.setGravity(Gravity.CENTER);
-                  root.addView(col, new FrameLayout.LayoutParams(-1, -1));
+                  root.addView(col, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
                   TextView t = new TextView(this);
                   t.setText(title);
@@ -354,11 +388,6 @@ jobs:
 
                   setContentView(root);
                   if (modern) mark(); else cells[1][1].requestFocus();
-
-                  col.setAlpha(0f);
-                  col.setScaleX(.94f);
-                  col.setScaleY(.94f);
-                  col.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(140).start();
                   overridePendingTransition(0, 0);
               }
 
@@ -423,21 +452,16 @@ jobs:
               void ok() {
                   done = true;
                   for (Dot x : dots) x.set(0xFF35D07F);
-                  if (mode == UNLOCK) {
-                      LockService.unlocked = pkg;
-                      LockService.showing = false;
-                      LockService sv = LockService.inst;
-                      if (sv != null) sv.widen();
-                  }
+                  if (mode == UNLOCK) Store.send(this, 1, pkg, null);
                   setResult(RESULT_OK);
                   if (mode == CREATE_FIRST) {
                       SettingsActivity.fresh = true;
                       startActivity(new Intent(this, SettingsActivity.class));
                   }
-                  col.animate().alpha(0f).setDuration(110).withEndAction(() -> {
+                  col.postDelayed(() -> {
                       finish();
                       overridePendingTransition(0, 0);
-                  }).start();
+                  }, 70);
               }
 
               void bad(String m) {
@@ -509,7 +533,7 @@ jobs:
               @Override
               public void onBackPressed() {
                   if (mode == UNLOCK) {
-                      LockService.showing = false;
+                      Store.send(this, 2, null, null);
                       goHome();
                   }
                   finish();
@@ -519,7 +543,7 @@ jobs:
               @Override
               protected void onStop() {
                   super.onStop();
-                  if (mode == UNLOCK) LockService.showing = false;
+                  if (mode == UNLOCK) Store.send(this, 2, null, null);
                   if (!done && !isFinishing()) {
                       if (mode == UNLOCK) goHome();
                       finish();
@@ -529,7 +553,7 @@ jobs:
               @Override
               protected void onDestroy() {
                   super.onDestroy();
-                  if (mode == UNLOCK) LockService.showing = false;
+                  Store.down();
               }
           }
           EOF_X
@@ -561,6 +585,7 @@ jobs:
               @Override
               protected void onCreate(Bundle b) {
                   super.onCreate(b);
+                  Store.up();
                   if (fresh) {
                       fresh = false;
                       build();
@@ -578,6 +603,12 @@ jobs:
                   } else {
                       busy = false;
                   }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  super.onDestroy();
+                  Store.down();
               }
 
               @Override
@@ -673,12 +704,19 @@ jobs:
           package com.vys.lock;
 
           import android.content.Context;
+          import android.content.Intent;
           import android.content.SharedPreferences;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.Process;
           import java.security.MessageDigest;
           import java.util.HashSet;
           import java.util.Set;
 
           final class Store {
+              static final String ACT = "com.vys.lock.E", PERM = "com.vys.lock.permission.IPC";
+
+              // Sadece servis sürecinde kullanılır; kilitli uygulama listesi bellekte tutulur.
               static volatile Set<String> cache;
 
               static SharedPreferences p(Context c) { return c.getSharedPreferences("s", 0); }
@@ -706,24 +744,57 @@ jobs:
 
               static void setModern(Context c, boolean b) { p(c).edit().putBoolean("md", b).apply(); }
 
-              static Set<String> load(Context c) {
+              static Set<String> locked(Context c) { return new HashSet<String>(p(c).getStringSet("l", new HashSet<String>())); }
+
+              // Servis tarafı
+              static boolean isLocked(Context c, String pkg) {
                   Set<String> s = cache;
                   if (s == null) {
-                      s = new HashSet<String>(p(c).getStringSet("l", new HashSet<String>()));
+                      s = locked(c);
                       cache = s;
                   }
-                  return s;
+                  return s.contains(pkg);
               }
 
-              static boolean isLocked(Context c, String pkg) { return load(c).contains(pkg); }
+              static Set<String> current(Context c) {
+                  isLocked(c, "");
+                  return cache;
+              }
 
-              static Set<String> locked(Context c) { return new HashSet<String>(load(c)); }
-
+              // Arayüz tarafı: kaydet ve servise bildir
               static void setLocked(Context c, Set<String> s) {
-                  cache = new HashSet<String>(s);
                   p(c).edit().putStringSet("l", new HashSet<String>(s)).apply();
-                  LockService sv = LockService.inst;
-                  if (sv != null) sv.apply();
+                  send(c, 3, null, s.toArray(new String[0]));
+              }
+
+              // Arayüz sürecinden servise mesaj: 1 = kilit açıldı, 2 = PIN ekranı kapandı, 3 = liste değişti
+              static void send(Context c, int t, String pkg, String[] list) {
+                  Intent i = new Intent(ACT).setPackage(c.getPackageName()).putExtra("t", t);
+                  if (pkg != null) i.putExtra("p", pkg);
+                  if (list != null) i.putExtra("l", list);
+                  c.sendBroadcast(i);
+              }
+
+              // Arayüz süreci: hiç ekran kalmayınca kısa süre sonra süreci kapatıp belleği boşaltır.
+              static int open;
+              static Handler h;
+              static final Runnable KILL = new Runnable() {
+                  @Override public void run() {
+                      if (open <= 0) Process.killProcess(Process.myPid());
+                  }
+              };
+
+              static void up() {
+                  open++;
+                  if (h != null) h.removeCallbacks(KILL);
+              }
+
+              static void down() {
+                  if (--open <= 0) {
+                      open = 0;
+                      if (h == null) h = new Handler(Looper.getMainLooper());
+                      h.postDelayed(KILL, 20000);
+                  }
               }
           }
           EOF_X
